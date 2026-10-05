@@ -58,6 +58,7 @@ private func reconfigurationCallback(_ display: CGDirectDisplayID,
     private var store: ProfileStore?
     private var confirmationSummary = ""
     private var terminating = false
+    private var previewVerification = PreviewVerification()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         activeController = self
@@ -166,7 +167,7 @@ private func reconfigurationCallback(_ display: CGDirectDisplayID,
             else { try SMAppService.mainApp.unregister() }
         } catch {
             launchCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
-            show(error.localizedDescription)
+            show("\(error.localizedDescription)\nアプリの置き場所を確認してください。ログイン時起動にはApplicationsフォルダに置いたアプリを使ってください。")
         }
     }
 
@@ -249,11 +250,11 @@ private func reconfigurationCallback(_ display: CGDirectDisplayID,
                 throw DisplaySystemError.unavailable("測定後に画面構成または配置が変わりました。もう一度測定してください。")
             }
             state = .applying(current, measurements, proposed, automatic)
+            let token = previewVerification.begin()
             try DisplaySystem.apply(proposed, to: current, permanent: false)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.verifyPreview()
-            }
+            schedulePreviewVerification(token: token, attempt: 1)
         } catch {
+            previewVerification.invalidate()
             let restoration: String
             if case .applying(let before, _, _, _) = state {
                 restoration = rollback(displays: before).message
@@ -266,25 +267,51 @@ private func reconfigurationCallback(_ display: CGDirectDisplayID,
         }
     }
 
-    private func verifyPreview() {
-        guard case let .applying(before, measurements, proposed, automatic) = state else { return }
+    private func schedulePreviewVerification(token: UUID, attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + PreviewVerification.interval) { [weak self] in
+            self?.verifyPreview(token: token, attempt: attempt)
+        }
+    }
+
+    private func verifyPreview(token: UUID, attempt: Int) {
+        guard previewVerification.accepts(token),
+              case let .applying(before, measurements, proposed, automatic) = state else { return }
+        let reading: PreviewVerification.Reading
+        var actual: [Display] = []
+        var reason = ""
         do {
-            let after = try DisplaySystem.snapshot().map(\.layout)
-            guard LayoutPlanner.matchingConfiguration(before.map(\.layout), after) else {
-                throw DisplaySystemError.unavailable("画面構成、主画面、X座標または表示設定が変わりました。")
+            actual = try DisplaySystem.snapshot().map(\.layout)
+            if !LayoutPlanner.matchingConfiguration(before.map(\.layout), actual) {
+                reading = .configurationMismatch
+                reason = "画面構成、主画面、X座標または表示設定が変わりました。"
+            } else if !LayoutPlanner.matchesPlannedY(actual, plannedY: proposed) {
+                reading = .positionMismatch
+                reason = "macOSによる位置補正で、指定位置を実現できませんでした。"
+            } else if !LayoutPlanner.matchesMeasuredPoints(measurements, actual: actual) {
+                reading = .pointMismatch
+                reason = "指定した点の高さが一致しませんでした。"
+            } else {
+                reading = .matched
             }
-            guard LayoutPlanner.matchesPlannedY(after, plannedY: proposed) else {
-                throw DisplaySystemError.unavailable("macOSによる位置補正で、指定位置を実現できませんでした。")
-            }
-            guard LayoutPlanner.matchesMeasuredPoints(measurements, actual: after) else {
-                throw DisplaySystemError.unavailable("指定した点の高さが一致しませんでした。")
-            }
-            showConfirmation(before: before, actual: after, proposed: proposed, automatic: automatic)
+        } catch DisplaySystemError.transient(let message) {
+            reading = .transient
+            reason = message
         } catch {
+            reading = .unavailable
+            reason = error.localizedDescription
+        }
+        switch PreviewVerification.decide(reading, attempt: attempt) {
+        case .retry:
+            schedulePreviewVerification(token: token, attempt: attempt + 1)
+        case .confirm:
+            previewVerification.invalidate()
+            showConfirmation(before: before, actual: actual, proposed: proposed, automatic: automatic)
+        case .cancel:
+            previewVerification.invalidate()
             let restoration = rollback(displays: before)
             state = .idle
             resetControls()
-            show("仮適用を取り消しました。\(restoration.message)\n\(error.localizedDescription)")
+            show("仮適用を取り消しました。\(restoration.message)\n\(reason)")
         }
     }
 
@@ -367,6 +394,7 @@ private func reconfigurationCallback(_ display: CGDirectDisplayID,
     }
 
     private func cancelSession(message: String?) {
+        previewVerification.invalidate()
         if case .idle = state { return }
         timer?.invalidate()
         switch state {
@@ -511,8 +539,11 @@ private func reconfigurationCallback(_ display: CGDirectDisplayID,
         }
         guard case .idle = state else { return }
         guard configuration.count >= 2, shouldRestore else { return }
-        guard let profile = try? store?.load()[key],
-              LayoutPlanner.matchingConfiguration(profile.displays, configuration) else { return }
+        guard let profile = try? store?.load()[key] else { return }
+        guard LayoutPlanner.matchingConfiguration(profile.displays, configuration) else {
+            show("画面の左右の位置が保存時と異なるため、自動復元を見送りました。手動で調整してください。")
+            return
+        }
         let current: [ConnectedDisplay]
         do {
             current = try DisplaySystem.snapshot()

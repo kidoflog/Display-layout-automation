@@ -241,6 +241,36 @@ public enum LayoutPlanner {
     }
 }
 
+public struct PreviewVerification: Sendable {
+    public static let interval: TimeInterval = 0.4
+    public static let maximumAttempts = 5
+
+    public enum Reading: Sendable {
+        case matched, transient, positionMismatch, configurationMismatch, pointMismatch, unavailable
+    }
+    public enum Decision: Equatable, Sendable { case confirm, retry, cancel }
+
+    private var activeToken: UUID?
+    public init() {}
+
+    public mutating func begin() -> UUID {
+        let token = UUID()
+        activeToken = token
+        return token
+    }
+    public mutating func invalidate() { activeToken = nil }
+    public func accepts(_ token: UUID) -> Bool { activeToken == token }
+
+    public static func decide(_ reading: Reading, attempt: Int) -> Decision {
+        switch reading {
+        case .matched: return .confirm
+        case .transient, .positionMismatch:
+            return attempt < maximumAttempts ? .retry : .cancel
+        case .configurationMismatch, .pointMismatch, .unavailable: return .cancel
+        }
+    }
+}
+
 public struct ConnectionTracker: Sendable {
     public private(set) var lastTopology: String?
     public private(set) var canceledTopology: String?

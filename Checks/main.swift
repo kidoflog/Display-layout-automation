@@ -147,6 +147,30 @@ do {
     check(LayoutPlanner.restorableY(original: chain,
           current: [screen("A", 0, 0), screen("B", 100, 25, main: true)]) == nil,
           "主画面変更時は旧座標を適用しない")
+    for reading: PreviewVerification.Reading in [.transient, .positionMismatch] {
+        for attempt in 1..<PreviewVerification.maximumAttempts {
+            check(PreviewVerification.decide(reading, attempt: attempt) == .retry,
+                  "反映待ちは上限前なら再試行")
+        }
+        check(PreviewVerification.decide(reading, attempt: PreviewVerification.maximumAttempts) == .cancel,
+              "反映待ちが続けば上限で取消")
+    }
+    check(PreviewVerification.decide(.matched, attempt: 2) == .confirm,
+          "一時的な失敗後に一致すれば確認へ進む")
+    check(PreviewVerification.decide(.matched, attempt: PreviewVerification.maximumAttempts) == .confirm,
+          "最終回で一致しても確認へ進む")
+    for reading: PreviewVerification.Reading in [.configurationMismatch, .pointMismatch, .unavailable] {
+        check(PreviewVerification.decide(reading, attempt: 1) == .cancel,
+              "構成変更・点の不一致・恒久的エラーは直ちに取消")
+    }
+    var verification = PreviewVerification()
+    let oldToken = verification.begin()
+    check(verification.accepts(oldToken), "現在の仮適用の検証を受け付ける")
+    verification.invalidate()
+    check(!verification.accepts(oldToken), "取消後の遅延処理を無効化")
+    let newToken = verification.begin()
+    check(!verification.accepts(oldToken) && verification.accepts(newToken),
+          "新しい仮適用中にも古い遅延処理を受け付けない")
     print("LayoutChecks: all checks passed")
 } catch {
     fatalError("LayoutChecks: \(error)")

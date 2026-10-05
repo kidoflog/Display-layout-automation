@@ -60,3 +60,5 @@ PLIST
 codesign --force --sign - --timestamp=none "$bundle"
 
 echo "$bundle"
+echo "ログイン時起動には、このアプリを /Applications または ~/Applications へコピーし、コピー先で有効にしてください。" >&2
+echo "更新・移動時はログイン時起動を無効にしてから置き換え、起動後に有効にし直してください。" >&2
